@@ -127,6 +127,14 @@ impl Auth {
         let authorization = format!("{}:{}", &self.user_name, &self.password);
         general_purpose::STANDARD.encode(authorization.as_bytes())
     }
+
+    pub fn username(&self) -> &str {
+        &self.user_name
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
 }
 
 #[derive(Clone)]
@@ -454,17 +462,15 @@ impl Proxy {
         Input: AsyncRead + AsyncWrite + Unpin,
         T: IntoTargetAddr<'a>,
     {
-        use rustls_platform_verifier::ConfigVerifierExt;
         use std::convert::TryFrom;
-        let verifier = tokio_rustls::rustls::ClientConfig::with_platform_verifier()
-            .map_err(|e| ProxyError::IoError(std::io::Error::other(e)))?;
-        let url_domain = self.intercept.get_domain()?;
 
+        let url_domain = self.intercept.get_domain()?;
         let domain = rustls_pki_types::ServerName::try_from(url_domain.as_str())
             .map_err(|e| ProxyError::AddressResolutionFailed(e.to_string()))?
             .to_owned();
-
-        let tls_connector = TlsConnector::from(std::sync::Arc::new(verifier));
+        let client_config = crate::verifier::client_config()
+            .map_err(|e| ProxyError::IoError(std::io::Error::other(e)))?;
+        let tls_connector = TlsConnector::from(std::sync::Arc::new(client_config));
         let stream = tls_connector.connect(domain, io).await?;
         self.http_connect(stream, target).await
     }

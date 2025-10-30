@@ -8,11 +8,7 @@ use crate::{
     ResultType,
 };
 use bytes::{Bytes, BytesMut};
-#[cfg(any(target_os = "android", target_os = "ios"))]
-use futures::future::{select_ok, FutureExt};
 use futures::{SinkExt, StreamExt};
-#[cfg(any(target_os = "android", target_os = "ios"))]
-use std::future::Future;
 use std::{
     io::{Error, ErrorKind},
     net::SocketAddr,
@@ -30,19 +26,6 @@ pub struct WsFramedStream {
     addr: SocketAddr,
     encrypt: Option<Encrypt>,
     send_timeout: u64,
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-async fn await_timeout_result<F, T, E>(future: F) -> ResultType<T>
-where
-    F: Future<Output = Result<Result<T, E>, tokio::time::error::Elapsed>>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    match future.await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(e)) => Err(e.into()),
-        Err(elapsed) => Err(Error::new(ErrorKind::TimedOut, elapsed).into()),
-    }
 }
 
 impl WsFramedStream {
@@ -63,47 +46,32 @@ impl WsFramedStream {
         let stream;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            let mut futures = vec![];
-
             let is_wss = url_str.starts_with("wss://");
-            let rustls_platform_verifier_initialized = !cfg!(target_os = "android")
-                || crate::config::RUSTLS_PLATFORM_VERIFIER_INITIALIZED
-                    .load(std::sync::atomic::Ordering::Relaxed);
-            if is_wss && rustls_platform_verifier_initialized {
-                use rustls_platform_verifier::ConfigVerifierExt;
+            if is_wss {
                 use std::sync::Arc;
-                use tokio_rustls::rustls::ClientConfig;
                 use tokio_tungstenite::{connect_async_tls_with_config, Connector};
-                match ClientConfig::with_platform_verifier() {
-                    Ok(config) => {
-                        let connector = Connector::Rustls(Arc::new(config));
-                        futures.push(
-                            await_timeout_result(timeout(
-                                Duration::from_millis(ms_timeout),
-                                connect_async_tls_with_config(
-                                    request.clone(),
-                                    None,
-                                    false,
-                                    Some(connector),
-                                ),
-                            ))
-                            .boxed(),
-                        );
-                    }
+
+                let connector = match crate::verifier::client_config() {
+                    Ok(client_config) => Some(Connector::Rustls(Arc::new(client_config))),
                     Err(e) => {
-                        log::error!("with_platform_verifier failed: {:?}", e);
+                        log::warn!(
+                            "Failed to get client config: {:?}, fallback to default connector",
+                            e
+                        );
+                        None
                     }
-                }
-            }
-            futures.push(
-                await_timeout_result(timeout(
+                };
+                let (s, _) = timeout(
                     Duration::from_millis(ms_timeout),
-                    connect_async(request),
-                ))
-                .boxed(),
-            );
-            let ((s, _), _) = select_ok(futures).await?;
-            stream = s;
+                    connect_async_tls_with_config(request, None, false, connector),
+                )
+                .await??;
+                stream = s;
+            } else {
+                let (s, _) =
+                    timeout(Duration::from_millis(ms_timeout), connect_async(request)).await??;
+                stream = s;
+            }
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
